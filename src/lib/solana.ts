@@ -1,4 +1,8 @@
-const RPC = process.env.SOLANA_RPC || "https://api.mainnet-beta.solana.com";
+const RPCS = [
+  process.env.SOLANA_RPC,
+  "https://api.mainnet-beta.solana.com",
+  "https://solana-rpc.publicnode.com",
+].filter(Boolean) as string[];
 
 export function isSolanaAddress(value: string): boolean {
   const v = value.trim();
@@ -7,94 +11,143 @@ export function isSolanaAddress(value: string): boolean {
 }
 
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-  const res = await fetch(RPC, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    cache: "no-store",
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(json.error.message || "SOLANA_RPC_ERROR");
-  return json.result as T;
+  let last = "SOLANA_RPC_ERROR";
+  for (const url of RPCS) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (json.error) {
+        last = json.error.message || last;
+        continue;
+      }
+      return json.result as T;
+    } catch (e) {
+      last = e instanceof Error ? e.message : last;
+    }
+  }
+  throw new Error(last);
 }
 
-function pct(part: number, total: number): number | null {
-  if (!total) return null;
-  return Number(((part / total) * 100).toFixed(2));
+type DexPair = {
+  dexId?: string;
+  url?: string;
+  priceUsd?: string;
+  fdv?: number;
+  marketCap?: number;
+  pairCreatedAt?: number;
+  baseToken?: { name?: string; symbol?: string };
+  quoteToken?: { symbol?: string };
+  liquidity?: { usd?: number };
+  volume?: { h24?: number };
+  priceChange?: { h24?: number };
+};
+
+async function dexInfo(mint: string): Promise<DexPair | null> {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${mint}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pairs: DexPair[] = Array.isArray(data) ? data : data?.pairs || [];
+    if (!pairs.length) return null;
+    return pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+  } catch {
+    return null;
+  }
 }
 
 export async function investigateSolanaToken(mint: string) {
   const unavailable: string[] = [];
-  let supplyUi = 0;
+  let name: string | null = null;
+  let symbol: string | null = null;
   let decimals: number | null = null;
+  let supplyUi = 0;
+
   try {
-    const supply = await rpc<{ value: { amount: string; decimals: number; uiAmount: number | null } }>(
-      "getTokenSupply",
-      [mint]
-    );
-    decimals = supply.value.decimals;
-    supplyUi = supply.value.uiAmount ?? Number(supply.value.amount) / 10 ** supply.value.decimals;
+    const acc = await rpc<{
+      value?: {
+        data?: {
+          parsed?: {
+            info?: {
+              decimals?: number;
+              supply?: string;
+              extensions?: Array<{ extension?: string; state?: { name?: string; symbol?: string } }>;
+            };
+          };
+        };
+      };
+    }>("getAccountInfo", [mint, { encoding: "jsonParsed" }]);
+    const info = acc?.value?.data?.parsed?.info;
+    if (!info) throw new Error("no mint");
+    decimals = info.decimals ?? null;
+    if (info.supply && decimals != null) supplyUi = Number(info.supply) / 10 ** decimals;
+    const meta = info.extensions?.find((e) => e.extension === "tokenMetadata")?.state;
+    if (meta?.name) name = meta.name;
+    if (meta?.symbol) symbol = meta.symbol;
   } catch {
-    throw new Error("INVALID_OR_UNKNOWN_TOKEN");
+    try {
+      const supply = await rpc<{ value: { amount: string; decimals: number; uiAmount: number | null } }>(
+        "getTokenSupply",
+        [mint]
+      );
+      decimals = supply.value.decimals;
+      supplyUi = supply.value.uiAmount ?? Number(supply.value.amount) / 10 ** supply.value.decimals;
+    } catch {
+      throw new Error("INVALID_OR_UNKNOWN_TOKEN");
+    }
   }
 
-  let largest: Array<{ address: string; uiAmount: number }> = [];
-  try {
-    const top = await rpc<{ value: Array<{ address: string; uiAmount: number | null; amount: string }> }>(
-      "getTokenLargestAccounts",
-      [mint]
-    );
-    largest = (top.value || []).map((x) => ({
-      address: x.address,
-      uiAmount: x.uiAmount ?? 0,
-    }));
-  } catch {
-    unavailable.push("holders");
-  }
+  const pair = await dexInfo(mint);
+  if (!pair) unavailable.push("market pair");
+  if (pair?.baseToken?.name) name = pair.baseToken.name;
+  if (pair?.baseToken?.symbol) symbol = pair.baseToken.symbol;
 
-  const holders = largest.map((h) => ({
-    address: h.address,
-    balance: h.uiAmount.toLocaleString("en-US"),
-    percent: pct(h.uiAmount, supplyUi) ?? 0,
-    isContract: false,
-    label: undefined as string | undefined,
-  }));
-
-  const sumPct = (n: number) => {
-    if (!holders.length) return null;
-    return Number(holders.slice(0, n).reduce((a, h) => a + h.percent, 0).toFixed(2));
-  };
+  const pairLine = pair
+    ? `${pair.baseToken?.symbol || symbol || "TOKEN"}/${pair.quoteToken?.symbol || "?"} on ${pair.dexId || "dex"}`
+    : "DATA UNAVAILABLE";
 
   return {
     token: {
       address: mint,
-      name: "Stonkfun token",
-      symbol: null,
+      name: name || "Solana token",
+      symbol,
       decimals,
       totalSupply: supplyUi ? supplyUi.toLocaleString("en-US") : null,
       holdersCount: 0,
       transfersCount: 0,
       deployer: null,
-      creationTx: null,
+      creationTx: pair?.pairCreatedAt ? new Date(pair.pairCreatedAt).toISOString() : null,
       verified: null,
     },
-    holders,
+    holders: [],
     transfers: [],
     metrics: {
-      top5Pct: sumPct(5),
-      top10Pct: sumPct(10),
-      top20Pct: sumPct(20),
-      largestPct: holders[0]?.percent ?? null,
-      whaleCount: holders.filter((h) => h.percent >= 1).length,
+      top5Pct: null,
+      top10Pct: null,
+      top20Pct: null,
+      largestPct: null,
+      whaleCount: 0,
       deployerRecipientCount: 0,
       deployerTransferCount: 0,
     },
     deployerTransfers: [],
-    unavailable: [
-      ...unavailable,
-      "deployer",
-      "transfers",
-      "token name/symbol metadata",
-    ],
+    unavailable: [...unavailable, "holder list", "deployer"],
+    market: {
+      launchpad: "Solana ecosystem",
+      network: "Solana",
+      pair: pairLine,
+      priceUsd: pair?.priceUsd || null,
+      marketCap: pair?.marketCap ?? pair?.fdv ?? null,
+      liquidityUsd: pair?.liquidity?.usd ?? null,
+      volume24h: pair?.volume?.h24 ?? null,
+      change24h: pair?.priceChange?.h24 ?? null,
+      dexUrl: pair?.url || null,
+    },
   };
 }

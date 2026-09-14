@@ -9,32 +9,25 @@ import { isSolanaAddress, investigateSolanaToken } from "@/lib/solana";
 
 export const runtime = "nodejs";
 
-const SYSTEM_PROMPT = `You are THE JUDGE of AI COURT, an on-chain intelligence tribunal.
-You receive REAL on-chain data (Solana RPC for Stonkfun mints, or Blockscout for EVM) plus a user question.
-You MUST analyze ONLY that data. Never invent holders, balances, transfers, deployer actions, or wallet relationships.
+const SYSTEM_PROMPT = `You are THE JUDGE of AI COURT.
+You receive REAL data about a Solana token (on-chain mint + Dexscreener market) plus a user question.
+Analyze ONLY that data. Never invent holders, prices, or pairs.
 
-Distinguish clearly:
-FACT — numbers and events present in the data.
-INFERENCE — cautious interpretation of those facts.
-UNKNOWN — anything not established by the data.
+Default task: LAUNCH CARD — name, ticker, supply, pair, market cap, liquidity, 24h volume.
+Skip holder forensics unless the user explicitly asks.
 
-A transfer between two wallets is NOT proof of common ownership.
-Do not label a liquidity pool, router, or burn address as an insider whale if it is labeled as protocol/system.
+FACT vs INFERENCE vs UNKNOWN. If a field is missing, say DATA UNAVAILABLE.
 
-Answer the USER QUESTION specifically. If they asked only for top holders, do not dump a generic essay. If they asked about the deployer, focus there. Full overview only when asked.
-
-Respond with ONLY a JSON object:
+Respond with ONLY JSON:
 {
   "verdict": "SHORT LABEL",
-  "confidence": 0-100 integer matching the provided DETERMINISTIC_SCORE unless data is missing (then lower it),
-  "reasoning": "2-5 sentences answering the question using facts then inference",
+  "confidence": 0-100,
+  "reasoning": "2-5 sentences on the launched token",
   "judge_quote": "dry one-liner under 20 words",
   "findings": [{"title":"SHORT TITLE","body":"one or two factual sentences"}],
-  "cannotProve": "one sentence on what the data cannot establish",
-  "focus": "holders|deployer|transfers|connections|overview|risk"
-}
-
-If a field is DATA UNAVAILABLE, say so. Do not fill gaps.`;
+  "cannotProve": "what this snapshot cannot establish",
+  "focus": "overview"
+}`;
 
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
@@ -42,6 +35,33 @@ function extractJson(text: string): unknown {
   const end = trimmed.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("No JSON object found");
   return JSON.parse(trimmed.slice(start, end + 1));
+}
+
+function card(bundle: {
+  token: { name: string | null; symbol: string | null; totalSupply: string | null; address: string };
+  metrics: { largestPct: number | null; top10Pct: number | null };
+  unavailable: string[];
+  market?: Record<string, unknown>;
+}, risk: { label: string; score: number }) {
+  const m = bundle.market || {};
+  return {
+    verdict: risk.label,
+    confidence: risk.score,
+    reasoning: `Launch card. ${bundle.token.name || "DATA UNAVAILABLE"} (${bundle.token.symbol || "n/a"}). Supply ${bundle.token.totalSupply ?? "DATA UNAVAILABLE"}. Pair ${m.pair ?? "DATA UNAVAILABLE"}. Mcap ${m.marketCap ?? "DATA UNAVAILABLE"}. Liq ${m.liquidityUsd ?? "DATA UNAVAILABLE"}. Vol24h ${m.volume24h ?? "DATA UNAVAILABLE"}.`,
+    judge_quote: "Read the mint. Then the market.",
+    findings: [
+      { title: "TOKEN", body: `${bundle.token.name} / ${bundle.token.symbol} — ${bundle.token.address}` },
+      { title: "MARKET", body: `Pair ${m.pair ?? "DATA UNAVAILABLE"} · mcap ${m.marketCap ?? "n/a"} · liq ${m.liquidityUsd ?? "n/a"}` },
+    ],
+    cannotProve: bundle.unavailable.length ? `Unavailable: ${bundle.unavailable.join(", ")}.` : "Off-chain team identity is not in this snapshot.",
+    focus: "overview",
+    snapshot: bundle.token,
+    metrics: bundle.metrics,
+    holders: [],
+    transfers: [],
+    deployerTransfers: [],
+    unavailable: bundle.unavailable,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -61,16 +81,10 @@ export async function POST(req: NextRequest) {
   const evm = isAddress(contract);
   const sol = isSolanaAddress(contract);
   if (!evm && !sol) {
-    return NextResponse.json(
-      { error: "Paste a Stonkfun / Solana mint or an EVM 0x address." },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Paste a Solana token mint (or an EVM 0x address)." }, { status: 400 });
   }
   if (!question) {
     return NextResponse.json({ error: "Ask the court a question about this token." }, { status: 400 });
-  }
-  if (question.length > 2000) {
-    return NextResponse.json({ error: "Keep the question under 2000 characters." }, { status: 400 });
   }
 
   let bundle;
@@ -80,43 +94,23 @@ export async function POST(req: NextRequest) {
     const msg = err instanceof Error ? err.message : "";
     if (msg === "INVALID_OR_UNKNOWN_TOKEN") {
       return NextResponse.json(
-        {
-          error: sol
-            ? "This is not a recognized Solana token mint. Paste the Stonkfun CA exactly as shown."
-            : "This address is not a recognized ERC-20 on Robinhood Chain.",
-        },
+        { error: sol ? "Not a recognized Solana mint. Paste the CA exactly." : "Not a recognized EVM token." },
         { status: 404 }
       );
     }
-    if (msg === "BLOCKSCOUT_BLOCKED" || msg === "BLOCKSCOUT_UNAVAILABLE") {
-      return NextResponse.json(
-        {
-          error:
-            "Robinhood Chain explorer blocked the request (Cloudflare). The CA may be valid — retry in a minute. No fabricated balances were shown.",
-        },
-        { status: 502 }
-      );
-    }
-    console.error(err);
-    return NextResponse.json(
-      { error: "Chain data could not be reached. No fabricated data will be shown." },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: "Chain data could not be reached. Nothing was invented." }, { status: 502 });
   }
 
-  const risk = scoreRisk(bundle);
-  const evidence = serializeBundle(bundle);
+  const risk = scoreRisk(bundle as never);
+  let evidence = serializeBundle(bundle as never);
+  const market = (bundle as { market?: Record<string, unknown> }).market;
+  if (market) {
+    evidence += "\n\nLAUNCH / MARKET\n" + Object.entries(market).map(([k, v]) => `${k}: ${v ?? "DATA UNAVAILABLE"}`).join("\n");
+  }
 
   const apiKey = process.env.CEREBRAS_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(
-      {
-        error: "Server is missing CEREBRAS_API_KEY. Add it in Vercel Environment Variables and redeploy.",
-        snapshot: bundle.token,
-        metrics: bundle.metrics,
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Missing CEREBRAS_API_KEY on Vercel.", snapshot: bundle.token, metrics: bundle.metrics }, { status: 500 });
   }
 
   const model = process.env.CEREBRAS_MODEL || "qwen-3.8-27b";
@@ -124,84 +118,35 @@ export async function POST(req: NextRequest) {
   try {
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
         temperature: 0.2,
         max_tokens: 900,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: `DETERMINISTIC_RISK_LABEL: ${risk.label}\nDETERMINISTIC_SCORE: ${risk.score}\n\nON-CHAIN EVIDENCE:\n${evidence}\n\nUSER QUESTION:\n${question}\n\nReturn JSON now.`,
-          },
+          { role: "user", content: `DETERMINISTIC_LABEL: ${risk.label}\nSCORE: ${risk.score}\n\nEVIDENCE:\n${evidence}\n\nQUESTION:\n${question}\n\nReturn JSON now.` },
         ],
       }),
     });
 
-    if (!response.ok) {
-      return NextResponse.json({
-        verdict: risk.label,
-        confidence: risk.score,
-        reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%. AI call failed; numbers are from the chain.`,
-        judge_quote: "The ledger is in. The prose can wait.",
-        findings: bundle.holders.slice(0, 3).map((h, i) => ({
-          title: `HOLDER ${i + 1}`,
-          body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
-        })),
-        cannotProve: bundle.unavailable.length
-          ? `Unavailable: ${bundle.unavailable.join(", ")}.`
-          : "Wallet identity and off-chain intent are not in this data.",
-        focus: "overview",
-        snapshot: bundle.token,
-        metrics: bundle.metrics,
-        holders: bundle.holders.slice(0, 15),
-        transfers: bundle.transfers.slice(0, 10),
-        deployerTransfers: bundle.deployerTransfers.slice(0, 10),
-        unavailable: bundle.unavailable,
-      });
-    }
+    if (!response.ok) return NextResponse.json(card(bundle as never, risk));
 
     const data = await response.json();
-    const rawText =
-      data?.choices?.[0]?.message?.content ||
-      data?.choices?.[0]?.message?.reasoning ||
-      "";
-
+    const rawText = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.message?.reasoning || "";
     let parsed: Record<string, unknown> = {};
     try {
       if (!rawText) throw new Error("empty");
       parsed = extractJson(rawText) as Record<string, unknown>;
     } catch {
-      parsed = {
-        verdict: risk.label,
-        reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%.`,
-        judge_quote: "The ledger is in. The prose can wait.",
-        findings: bundle.holders.slice(0, 3).map((h, i) => ({
-          title: `HOLDER ${i + 1}`,
-          body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
-        })),
-        cannotProve: bundle.unavailable.length
-          ? `Unavailable: ${bundle.unavailable.join(", ")}.`
-          : "Wallet identity and off-chain intent are not in this data.",
-        focus: "overview",
-      };
+      return NextResponse.json(card(bundle as never, risk));
     }
 
     const findings = Array.isArray(parsed.findings)
-      ? parsed.findings
-          .filter((f) => f && typeof f === "object")
-          .slice(0, 6)
-          .map((f) => {
-            const o = f as Record<string, unknown>;
-            return {
-              title: String(o.title || "").slice(0, 80),
-              body: String(o.body || "").slice(0, 400),
-            };
-          })
+      ? parsed.findings.filter((f) => f && typeof f === "object").slice(0, 6).map((f) => {
+          const o = f as Record<string, unknown>;
+          return { title: String(o.title || "").slice(0, 80), body: String(o.body || "").slice(0, 400) };
+        })
       : [];
 
     return NextResponse.json({
@@ -211,33 +156,15 @@ export async function POST(req: NextRequest) {
       judge_quote: String(parsed.judge_quote || "").slice(0, 200),
       findings,
       cannotProve: String(parsed.cannotProve || "").slice(0, 400),
-      focus: String(parsed.focus || "overview").slice(0, 40),
-      snapshot: bundle.token,
-      metrics: bundle.metrics,
-      holders: bundle.holders.slice(0, 15),
-      transfers: bundle.transfers.slice(0, 10),
-      deployerTransfers: bundle.deployerTransfers.slice(0, 10),
-      unavailable: bundle.unavailable,
-    });
-  } catch (err) {
-    console.error("Judge route error:", err);
-    return NextResponse.json({
-      verdict: risk.label,
-      confidence: risk.score,
-      reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%.`,
-      judge_quote: "The ledger is in. The prose can wait.",
-      findings: bundle.holders.slice(0, 3).map((h, i) => ({
-        title: `HOLDER ${i + 1}`,
-        body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
-      })),
-      cannotProve: "AI formatting failed. Holder percentages below are from the chain.",
       focus: "overview",
       snapshot: bundle.token,
       metrics: bundle.metrics,
-      holders: bundle.holders.slice(0, 15),
-      transfers: bundle.transfers.slice(0, 10),
-      deployerTransfers: bundle.deployerTransfers.slice(0, 10),
+      holders: [],
+      transfers: [],
+      deployerTransfers: [],
       unavailable: bundle.unavailable,
     });
+  } catch {
+    return NextResponse.json(card(bundle as never, risk));
   }
 }

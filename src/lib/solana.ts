@@ -49,9 +49,7 @@ type DexPair = {
 
 async function dexInfo(mint: string): Promise<DexPair | null> {
   try {
-    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${mint}`, {
-      cache: "no-store",
-    });
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${mint}`, { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     const pairs: DexPair[] = Array.isArray(data) ? data : data?.pairs || [];
@@ -123,15 +121,15 @@ export async function investigateSolanaToken(mint: string) {
       transfersCount: 0,
       deployer: null,
       creationTx: pair?.pairCreatedAt ? new Date(pair.pairCreatedAt).toISOString() : null,
-      verified: null,
+      verified: false,
     },
     holders: [],
     transfers: [],
     metrics: {
-      top5Pct: null,
-      top10Pct: null,
-      top20Pct: null,
-      largestPct: null,
+      top5Pct: 0,
+      top10Pct: 0,
+      top20Pct: 0,
+      largestPct: 0,
       whaleCount: 0,
       deployerRecipientCount: 0,
       deployerTransferCount: 0,

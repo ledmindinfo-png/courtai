@@ -51,8 +51,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     question = typeof body?.question === "string" ? body.question.trim() : "";
     contract = typeof body?.contract === "string" ? body.contract.trim() : "";
-    if (contract.startsWith("0X")) contract = "0x" + contract.slice(2);
-    contract = contract.toLowerCase().replace(/^0x/, "0x");
+    if (contract.startsWith("0x") || contract.startsWith("0X")) {
+      contract = "0x" + contract.slice(2).toLowerCase();
+    }
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
@@ -79,13 +80,20 @@ export async function POST(req: NextRequest) {
     const msg = err instanceof Error ? err.message : "";
     if (msg === "INVALID_OR_UNKNOWN_TOKEN") {
       return NextResponse.json(
-        { error: "This address is not a recognized ERC-20 on Robinhood Chain. Check the CA (0x + 40 hex) and that it is on chain 4663." },
+        {
+          error: sol
+            ? "This is not a recognized Solana token mint. Paste the Stonkfun CA exactly as shown."
+            : "This address is not a recognized ERC-20 on Robinhood Chain.",
+        },
         { status: 404 }
       );
     }
     if (msg === "BLOCKSCOUT_BLOCKED" || msg === "BLOCKSCOUT_UNAVAILABLE") {
       return NextResponse.json(
-        { error: "Robinhood Chain explorer blocked the request (Cloudflare). The CA may be valid — retry in a minute. No fabricated balances were shown." },
+        {
+          error:
+            "Robinhood Chain explorer blocked the request (Cloudflare). The CA may be valid — retry in a minute. No fabricated balances were shown.",
+        },
         { status: 502 }
       );
     }
@@ -111,7 +119,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const model = process.env.CEREBRAS_MODEL || "gemma-4-31b";
+  const model = process.env.CEREBRAS_MODEL || "qwen-3.8-27b";
 
   try {
     const response = await fetch("https://api.cerebras.ai/v1/chat/completions", {
@@ -138,7 +146,10 @@ export async function POST(req: NextRequest) {
       const errText = await response.text();
       console.error("Cerebras API error:", response.status, errText);
       return NextResponse.json(
-        { error: "The court could not be reached. On-chain data was fetched but the AI call failed. Nothing was invented." },
+        {
+          error:
+            "The court could not be reached. On-chain data was fetched but the AI call failed. Nothing was invented.",
+        },
         { status: 502 }
       );
     }

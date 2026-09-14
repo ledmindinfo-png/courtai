@@ -143,22 +143,54 @@ export async function POST(req: NextRequest) {
     });
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("Cerebras API error:", response.status, errText);
-      return NextResponse.json(
-        {
-          error:
-            "The court could not be reached. On-chain data was fetched but the AI call failed. Nothing was invented.",
-        },
-        { status: 502 }
-      );
+      return NextResponse.json({
+        verdict: risk.label,
+        confidence: risk.score,
+        reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%. AI call failed; numbers are from the chain.`,
+        judge_quote: "The ledger is in. The prose can wait.",
+        findings: bundle.holders.slice(0, 3).map((h, i) => ({
+          title: `HOLDER ${i + 1}`,
+          body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
+        })),
+        cannotProve: bundle.unavailable.length
+          ? `Unavailable: ${bundle.unavailable.join(", ")}.`
+          : "Wallet identity and off-chain intent are not in this data.",
+        focus: "overview",
+        snapshot: bundle.token,
+        metrics: bundle.metrics,
+        holders: bundle.holders.slice(0, 15),
+        transfers: bundle.transfers.slice(0, 10),
+        deployerTransfers: bundle.deployerTransfers.slice(0, 10),
+        unavailable: bundle.unavailable,
+      });
     }
 
     const data = await response.json();
-    const textBlock = { text: data?.choices?.[0]?.message?.content || "" };
-    if (!textBlock.text) throw new Error("Empty response from model");
+    const rawText =
+      data?.choices?.[0]?.message?.content ||
+      data?.choices?.[0]?.message?.reasoning ||
+      "";
 
-    const parsed = extractJson(textBlock.text) as Record<string, unknown>;
+    let parsed: Record<string, unknown> = {};
+    try {
+      if (!rawText) throw new Error("empty");
+      parsed = extractJson(rawText) as Record<string, unknown>;
+    } catch {
+      parsed = {
+        verdict: risk.label,
+        reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%.`,
+        judge_quote: "The ledger is in. The prose can wait.",
+        findings: bundle.holders.slice(0, 3).map((h, i) => ({
+          title: `HOLDER ${i + 1}`,
+          body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
+        })),
+        cannotProve: bundle.unavailable.length
+          ? `Unavailable: ${bundle.unavailable.join(", ")}.`
+          : "Wallet identity and off-chain intent are not in this data.",
+        focus: "overview",
+      };
+    }
+
     const findings = Array.isArray(parsed.findings)
       ? parsed.findings
           .filter((f) => f && typeof f === "object")
@@ -189,9 +221,23 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error("Judge route error:", err);
-    return NextResponse.json(
-      { error: "The court encountered an error reaching a verdict. No fabricated chain data was produced." },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      verdict: risk.label,
+      confidence: risk.score,
+      reasoning: `On-chain metrics only. Top holder ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%. Top 10 ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%.`,
+      judge_quote: "The ledger is in. The prose can wait.",
+      findings: bundle.holders.slice(0, 3).map((h, i) => ({
+        title: `HOLDER ${i + 1}`,
+        body: `${h.address} holds ${h.percent.toFixed(2)}% (${h.balance}).`,
+      })),
+      cannotProve: "AI formatting failed. Holder percentages below are from the chain.",
+      focus: "overview",
+      snapshot: bundle.token,
+      metrics: bundle.metrics,
+      holders: bundle.holders.slice(0, 15),
+      transfers: bundle.transfers.slice(0, 10),
+      deployerTransfers: bundle.deployerTransfers.slice(0, 10),
+      unavailable: bundle.unavailable,
+    });
   }
 }

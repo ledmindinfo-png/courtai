@@ -3,16 +3,15 @@ const BASES = [
   "https://www.robinhoodchain.blockscout.com/api/v2",
 ];
 const RPC = process.env.ROBINHOOD_RPC || "https://rpc.mainnet.chain.robinhood.com";
-const UA =
-  "Mozilla/5.0 (compatible; AICourt/1.0; +https://blockscout.com)";
+const UA = "Mozilla/5.0 (compatible; AICourt/1.0; +https://blockscout.com)";
 
 export const KNOWN_SYSTEM = new Set(
   [
     "0x0000000000000000000000000000000000000000",
     "0x000000000000000000000000000000000000dead",
     "0xffffffffffffffffffffffffffffffffffffffff",
-    "0x8366a39cc670b4001a1121b8f6a443a643e40951", // Uniswap v4 PoolManager
-    "0x8876789976decbfcbbbe364623c63652db8c0904", // Universal Router
+    "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+    "0x8876789976decbfcbbbe364623c63652db8c0904",
   ].map((a) => a.toLowerCase())
 );
 
@@ -30,10 +29,7 @@ async function getJson<T>(path: string): Promise<{ data: T | null; error?: strin
   for (const base of BASES) {
     try {
       const res = await fetch(`${base}${path}`, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": UA,
-        },
+        headers: { Accept: "application/json", "User-Agent": UA },
         cache: "no-store",
       });
       const text = await res.text();
@@ -192,15 +188,12 @@ type ContractApi = {
 export async function getTokenInfo(address: string) {
   return getJson<TokenApi>(`/tokens/${address}`);
 }
-
 export async function getTokenHolders(address: string) {
   return getJson<HolderApi>(`/tokens/${address}/holders`);
 }
-
 export async function getTokenTransfers(address: string) {
   return getJson<TransferApi>(`/tokens/${address}/transfers`);
 }
-
 export async function getContractInfo(address: string) {
   return getJson<ContractApi>(`/smart-contracts/${address}`);
 }
@@ -226,7 +219,12 @@ export async function investigateToken(address: string) {
   if (!tokenData || tokenRes.error) {
     const rpcTok = await tokenFromRpc(address);
     if (rpcTok && (rpcTok.symbol || rpcTok.total_supply)) {
-      tokenData = rpcTok;
+      tokenData = {
+        name: rpcTok.name ?? undefined,
+        symbol: rpcTok.symbol ?? undefined,
+        decimals: rpcTok.decimals != null ? String(rpcTok.decimals) : undefined,
+        total_supply: rpcTok.total_supply ?? undefined,
+      };
       unavailable.push("blockscout token index (used RPC fallback)");
     }
   }
@@ -274,22 +272,15 @@ export async function investigateToken(address: string) {
   const deployer = contractRes.data?.creator_address_hash || null;
   const creationTx = contractRes.data?.creation_transaction_hash || null;
   const verified = contractRes.data?.is_verified ?? null;
-
   const deployerTransfers = deployer
-    ? transfers.filter(
-        (tx) => tx.from.toLowerCase() === deployer.toLowerCase()
-      )
+    ? transfers.filter((tx) => tx.from.toLowerCase() === deployer.toLowerCase())
     : [];
-
   const circulatingHolders = holders.filter((h) => h.label !== "BURN / SYSTEM");
 
   const sumPct = (n: number) => {
     if (!circulatingHolders.length) return null;
     return Number(
-      circulatingHolders
-        .slice(0, n)
-        .reduce((acc, h) => acc + (h.percent || 0), 0)
-        .toFixed(2)
+      circulatingHolders.slice(0, n).reduce((acc, h) => acc + (h.percent || 0), 0).toFixed(2)
     );
   };
 
@@ -299,7 +290,7 @@ export async function investigateToken(address: string) {
     top20Pct: sumPct(20),
     largestPct: circulatingHolders[0]?.percent ?? null,
     whaleCount: circulatingHolders.filter((h) => (h.percent || 0) >= 1 && h.label !== "LIQUIDITY / PROTOCOL").length,
-    deployerRecipientCount: new Set(deployerTransfers.map((t) => t.to.toLowerCase())).size,
+    deployerRecipientCount: new Set(deployerTransfers.map((x) => x.to.toLowerCase())).size,
     deployerTransferCount: deployerTransfers.length,
   };
 
@@ -324,29 +315,19 @@ export async function investigateToken(address: string) {
   };
 }
 
-export function scoreRisk(bundle: Awaited<ReturnType<typeof investigateToken>>): {
-  label: string;
-  score: number;
-} {
+export function scoreRisk(bundle: Awaited<ReturnType<typeof investigateToken>>): { label: string; score: number } {
   const m = bundle.metrics;
-  if (m.top10Pct == null && !bundle.holders.length) {
-    return { label: "INSUFFICIENT DATA", score: 20 };
-  }
+  if (m.top10Pct == null && !bundle.holders.length) return { label: "INSUFFICIENT DATA", score: 20 };
   let score = 20;
   if ((m.largestPct || 0) >= 20) score += 25;
   else if ((m.largestPct || 0) >= 10) score += 15;
   else if ((m.largestPct || 0) >= 5) score += 8;
-
   if ((m.top10Pct || 0) >= 60) score += 25;
   else if ((m.top10Pct || 0) >= 40) score += 16;
   else if ((m.top10Pct || 0) >= 25) score += 8;
-
   if ((m.whaleCount || 0) <= 2 && (m.top10Pct || 0) > 30) score += 10;
   if ((m.deployerTransferCount || 0) >= 3) score += 8;
-
-  const connected = detectDirectHolderTransfers(bundle);
-  if (connected >= 2) score += 10;
-
+  if (detectDirectHolderTransfers(bundle) >= 2) score += 10;
   score = Math.max(5, Math.min(95, score));
   let label = "LOW RISK SIGNALS";
   if (score >= 75) label = "HIGH RISK";
@@ -364,58 +345,51 @@ export function detectDirectHolderTransfers(bundle: Awaited<ReturnType<typeof in
   );
   let n = 0;
   for (const tx of bundle.transfers) {
-    if (top.has(tx.from.toLowerCase()) && top.has(tx.to.toLowerCase()) && tx.from.toLowerCase() !== tx.to.toLowerCase()) {
-      n += 1;
-    }
+    if (top.has(tx.from.toLowerCase()) && top.has(tx.to.toLowerCase()) && tx.from.toLowerCase() !== tx.to.toLowerCase()) n += 1;
   }
   return n;
 }
 
 export function serializeBundle(bundle: Awaited<ReturnType<typeof investigateToken>>): string {
   const t = bundle.token;
-  const lines: string[] = [];
-  lines.push("TOKEN");
-  lines.push(`Name: ${t.name ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Symbol: ${t.symbol ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Address: ${t.address}`);
-  lines.push(`Decimals: ${t.decimals ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Supply: ${t.totalSupply ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Holders: ${t.holdersCount ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Transfers counted: ${t.transfersCount ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Verified: ${t.verified === null ? "DATA UNAVAILABLE" : t.verified}`);
-  lines.push(`Deployer: ${t.deployer ?? "DATA UNAVAILABLE"}`);
-  lines.push(`Creation tx: ${t.creationTx ?? "DATA UNAVAILABLE"}`);
-  lines.push("");
-  lines.push("TOP HOLDERS");
+  const lines = [
+    "TOKEN",
+    `Name: ${t.name ?? "DATA UNAVAILABLE"}`,
+    `Symbol: ${t.symbol ?? "DATA UNAVAILABLE"}`,
+    `Address: ${t.address}`,
+    `Decimals: ${t.decimals ?? "DATA UNAVAILABLE"}`,
+    `Supply: ${t.totalSupply ?? "DATA UNAVAILABLE"}`,
+    `Holders: ${t.holdersCount ?? "DATA UNAVAILABLE"}`,
+    `Transfers counted: ${t.transfersCount ?? "DATA UNAVAILABLE"}`,
+    `Verified: ${t.verified === null ? "DATA UNAVAILABLE" : t.verified}`,
+    `Deployer: ${t.deployer ?? "DATA UNAVAILABLE"}`,
+    `Creation tx: ${t.creationTx ?? "DATA UNAVAILABLE"}`,
+    "",
+    "TOP HOLDERS",
+  ];
   if (!bundle.holders.length) lines.push("DATA UNAVAILABLE");
   bundle.holders.slice(0, 20).forEach((h, i) => {
-    lines.push(
-      `${i + 1}. ${h.address}  ${h.percent.toFixed(2)}%  bal=${h.balance}  ${h.isContract ? "contract" : "eoa"} ${h.label || ""}`
-    );
+    lines.push(`${i + 1}. ${h.address}  ${h.percent.toFixed(2)}%  bal=${h.balance}  ${h.isContract ? "contract" : "eoa"} ${h.label || ""}`);
   });
-  lines.push("");
-  lines.push("CONCENTRATION");
+  lines.push("", "CONCENTRATION");
   lines.push(`Top 5: ${bundle.metrics.top5Pct ?? "DATA UNAVAILABLE"}%`);
   lines.push(`Top 10: ${bundle.metrics.top10Pct ?? "DATA UNAVAILABLE"}%`);
   lines.push(`Top 20: ${bundle.metrics.top20Pct ?? "DATA UNAVAILABLE"}%`);
   lines.push(`Largest: ${bundle.metrics.largestPct ?? "DATA UNAVAILABLE"}%`);
   lines.push(`Meaningful whales (>=1%, excluding LP/burn): ${bundle.metrics.whaleCount ?? "DATA UNAVAILABLE"}`);
-  lines.push("");
-  lines.push("DEPLOYER TOKEN TRANSFERS (from retrieved window)");
+  lines.push("", "DEPLOYER TOKEN TRANSFERS (from retrieved window)");
   if (!bundle.token.deployer) lines.push("DATA UNAVAILABLE");
   else if (!bundle.deployerTransfers.length) lines.push("None in retrieved transfer window.");
   bundle.deployerTransfers.forEach((tx) => {
     lines.push(`${tx.hash} ${tx.from} -> ${tx.to} amount=${tx.amount} at ${tx.timestamp || "?"}`);
   });
-  lines.push("");
-  lines.push("RECENT / LARGE TRANSFERS (retrieved window)");
+  lines.push("", "RECENT / LARGE TRANSFERS (retrieved window)");
   if (!bundle.transfers.length) lines.push("DATA UNAVAILABLE");
   bundle.transfers.slice(0, 15).forEach((tx) => {
     lines.push(`${tx.hash} ${tx.from} -> ${tx.to} amount=${tx.amount} at ${tx.timestamp || "?"}`);
   });
   if (bundle.unavailable.length) {
-    lines.push("");
-    lines.push("UNAVAILABLE FIELDS: " + bundle.unavailable.join(", "));
+    lines.push("", "UNAVAILABLE FIELDS: " + bundle.unavailable.join(", "));
   }
   return lines.join("\n");
 }

@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  background-color: #f3efe6;
+  color: #0b0b0c;
+}
+
+::selection {
+  background: #8b1e1e;
+  color: #f3efe6;
+}
+
+.paper-grain {
+  background-image:
+    radial-gradient(rgba(11, 11, 12, 0.035) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+.rule {
+  border-color: #0b0b0c;
+}
+
+.stamp-ring {
+  border: 2.5px solid currentColor;
+  border-radius: 9999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+a,
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+textarea:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #8b1e1e;
+  outline-offset: 2px;
+}
